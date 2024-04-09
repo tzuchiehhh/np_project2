@@ -317,6 +317,7 @@ int main(int argc, const char *argv[]) {
     int opt = 1;
     setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
 
+    bzero(&server_addr, sizeof(server_addr));
     // TCP server address and port
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;  // Bind to any available interface
