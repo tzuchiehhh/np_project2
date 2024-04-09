@@ -18,7 +18,10 @@
 #define BUFFER_SIZE 15001
 
 using namespace std;
-// void BroadCast(string message);
+
+fd_set rfds; // read file descriptor set
+fd_set afds; // active file descriptor set
+
 struct Command {
     vector<string> exec_command;
     bool is_error_pipe = false;
@@ -34,13 +37,16 @@ struct Command {
 struct Job {
     int job_id;
     bool is_built_in_command = false;
+    bool is_self_defined_command = false;
     vector<string> built_in_command;
+    vector<string> self_defined_command;
     queue<Command> command_queue;
 };
 
 struct Client {
 
     queue<Job> job_queue;
+    int max_job_id = 0;
     int id = -1;
     int conn_fd = -1;
     string ip;
@@ -83,9 +89,26 @@ void init_client_env(Client client) {
     }
 };
 
-void unset_client_env(Client client) {
+void unset_client_env(Client &client) {
     for (map<string, string>::iterator it = client.environment_var_map.begin(); it != client.environment_var_map.end(); ++it)
         unsetenv(it->first.c_str());
+};
+
+void client_logout(Client &client) {
+    string notify_msg = "*** User \'" + client.nickname + "\' left. ***\n";
+    // broadcast message
+    send_msg(-1, notify_msg, true);
+    // reset buffer
+    memset(client.buffer, '\0', sizeof(client.buffer));
+
+    // close client file descriptor
+    close(client.conn_fd);
+    // unset client environment variable
+    unset_client_env(client);
+    // clear client fd
+    FD_CLR(client.conn_fd, &afds);
+    // reset client
+    client = Client();
 };
 
 string remove_endl(char *s) {
@@ -138,7 +161,7 @@ void close_pipe(pair<int, int> p) {
     return;
 }
 
-bool handle_built_in_command(vector<string> tokens, int client_socket) {
+bool handle_built_in_command(vector<string> tokens, int client_fd) {
     // Terminate client connection
     bool terminate_client = false;
     if (tokens[0] == "exit") {
@@ -152,10 +175,64 @@ bool handle_built_in_command(vector<string> tokens, int client_socket) {
         if (environment_variable) {
             // cout << environment_variable << endl;
             string send_environment_variable = (string)environment_variable + "\n";
-            send(client_socket, send_environment_variable.c_str(), strlen(send_environment_variable.c_str()), 0);
+            send_msg(client_fd, send_environment_variable);
+            // send(client_socket, send_environment_variable.c_str(), strlen(send_environment_variable.c_str()), 0);
         }
     }
     return terminate_client;
+}
+
+void handle_self_defined_command(vector<string> tokens, Client &client) {
+    if (tokens[0] == "who") {
+        string msg = "<ID>\t<nickname>\t<IP:port>\t<indicate me>\n";
+        for (int i = 1; i < 31; i++) {
+            if (clients[i].conn_fd == -1)
+                continue;
+
+            msg += to_string(clients[i].id) + "\t" + clients[i].nickname + "\t" + string(clients[i].ip) + ":" + to_string(clients[i].port);
+            if (i == client.id)
+                msg += "\t<-me\n";
+            else
+                msg += "\n";
+        }
+        send_msg(client.conn_fd, msg);
+
+    } else if (tokens[0] == "tell") {
+        int user_id = atoi(tokens[1].c_str());
+        // user does not exist
+        if (clients[user_id].id == -1) {
+            string err_msg = "*** Error: user #" + tokens[1] + " does not exist yet. ***\n";
+            send_msg(client.conn_fd, err_msg);
+        } else {
+            string msg = "*** " + client.nickname + " told you ***:";
+            for (int i = 2; i < tokens.size(); i++) {
+                msg += " " + tokens[i];
+            }
+            msg += "\n";
+            send_msg(clients[user_id].conn_fd, msg);
+        }
+
+    } else if (tokens[0] == "yell") {
+        string msg = "*** " + client.nickname + " yelled ***:";
+        for (int i = 1; i < tokens.size(); i++) {
+            msg += " " + tokens[i];
+        }
+        msg += "\n";
+        send_msg(-1, msg, true);
+
+    } else if (tokens[0] == "name") {
+        for (int i = 1; i < 31; i++) {
+            if (clients[i].nickname == tokens[1]){
+                string error_msg = "*** User ’"+tokens[1]+"’ already exists. ***\n";
+                send_msg(client.conn_fd,error_msg);
+                return;
+            }
+
+        }
+        client.nickname = tokens[1];
+        string msg = "*** User from "+string(client.ip)+":"+to_string(client.port)+" is named ’"+tokens[1]+"’. ***\n";
+        send_msg(-1,msg,true);
+    }
 }
 
 int parse(queue<Job> &job_queue, const string &str, const char &delimiter, int job_id) {
@@ -171,11 +248,17 @@ int parse(queue<Job> &job_queue, const string &str, const char &delimiter, int j
         // built-in command arguments
         if (job.is_built_in_command) {
             job.built_in_command.push_back(token);
+        } else if (job.is_self_defined_command) {
+            job.self_defined_command.push_back(token);
         }
         // First built-in command
         else if (token == "setenv" || token == "printenv" || token == "exit") {
             job.is_built_in_command = true;
             job.built_in_command.push_back(token);
+
+        } else if (token == "who" || token == "tell" || token == "yell" || token == "name") {
+            job.is_self_defined_command = true;
+            job.self_defined_command.push_back(token);
 
         }
         // pipe or numbered pipe
@@ -233,7 +316,7 @@ int parse(queue<Job> &job_queue, const string &str, const char &delimiter, int j
         }
     }
 
-    if (job.is_built_in_command) {
+    if (job.is_built_in_command || job.is_self_defined_command) {
         job_id++;
         job.job_id = job_id;
         job_queue.push(job);
@@ -408,89 +491,72 @@ int passiveTCP(const char *service, int qlen) {
     return passivesock(service, "tcp", qlen);
 }
 
-void process_client_command(Client client) {
-    // bool terminate_client = false;
-    // while (!terminate_client) {
+bool process_client_command(Client &client) {
 
-    //     const char *prompt_str = "% ";
-    //     // send % to client
-    //     send(client.conn_fd, prompt_str, strlen(prompt_str), 0);
+    string user_input = (string)(remove_endl(client.buffer));
+    cout << "user input: " << user_input << endl;
+    // parse user input
+    char delimiter = ' ';
+    queue<Job> job_queue;
 
-    //     // Receive user input from client
-    //     char buffer[BUFFER_SIZE];
-    //     int bytes_received = read(client_socket, buffer, BUFFER_SIZE);
-    //     // cout << bytes_received << endl;
-    //     if (bytes_received <= 0) {
-    //         cerr << "Error receiving data from client" << endl;
-    //         close(client_socket);
-    //         continue;
-    //     }
+    client.max_job_id = parse(job_queue, user_input, delimiter, client.max_job_id);
+    while (!job_queue.empty()) {
+        Job c_job = job_queue.front();
+        if (c_job.is_built_in_command) {
+            if (handle_built_in_command(c_job.built_in_command, client.conn_fd)) {
+                // client exit
+                return true;
+            }
+            job_queue.pop();
+            continue;
+        }
+        if (c_job.is_self_defined_command) {
+            handle_self_defined_command(c_job.self_defined_command, client);
+            job_queue.pop();
+            continue;
+        }
+        // cout << "command queue size: " << c_job.command_queue.size() << endl;
+        while (!c_job.command_queue.empty()) {
+            Command c_command = c_job.command_queue.front();
+            c_job.command_queue.pop();
 
-    //     // replace newline character with null character
-    //     char *bp;
-    //     if ((bp = strchr(buffer, '\n')) != NULL)
-    //         *bp = '\0';
-    //     if ((bp = strchr(buffer, '\r')) != NULL)
-    //         *bp = '\0';
-    //     user_input = (string)(buffer);
-    //     // cout << "user input: " << user_input << endl;
-    //     // parse user input
-    //     char delimiter = ' ';
-    //     queue<Job> job_queue;
-    //     job_id = parse(job_queue, user_input, delimiter, job_id);
-    //     while (!job_queue.empty()) {
-    //         Job c_job = job_queue.front();
-    //         if (c_job.is_built_in_command) {
-    //             terminate_client = handle_built_in_command(c_job.built_in_command, client_socket);
-    //             if (terminate_client) {
-    //                 break;
-    //             }
-    //             job_queue.pop();
-    //             continue;
-    //         }
-    //         // cout << "command queue size: " << c_job.command_queue.size() << endl;
-    //         while (!c_job.command_queue.empty()) {
-    //             Command c_command = c_job.command_queue.front();
-    //             c_job.command_queue.pop();
+            // cout << "current execute command: ";
+            // for (int i = 0; i < c_command.exec_command.size(); i++) {
+            //     cout << c_command.exec_command[i] << " ";
+            // }
+            // cout << endl;
 
-    //             // cout << "current execute command: ";
-    //             // for (int i = 0; i < c_command.exec_command.size(); i++) {
-    //             //     cout << c_command.exec_command[i] << " ";
-    //             // }
-    //             // cout << endl;
+            // oridinary pipe after this command
+            if (c_command.pipe_number == 0) {
 
-    //             // oridinary pipe after this command
-    //             if (c_command.pipe_number == 0) {
+                // read next command
+                Command *n_command = &c_job.command_queue.front();
 
-    //                 // read next command
-    //                 Command *n_command = &c_job.command_queue.front();
+                // create pipe and assign it to current command output pipe
+                c_command.output_pipe = create_pipe();
 
-    //                 // create pipe and assign it to current command output pipe
-    //                 c_command.output_pipe = create_pipe();
+                // assign current command output pipe to next command input pipe
+                n_command->input_pipe = c_command.output_pipe;
+            }
+            // numbered pipe
+            else if (c_command.pipe_number > 0) {
+                c_command.output_pipe = create_numbered_pipe(c_job.job_id + c_command.pipe_number, client.numbered_pipe_map);
+            }
 
-    //                 // assign current command output pipe to next command input pipe
-    //                 n_command->input_pipe = c_command.output_pipe;
-    //             }
-    //             // numbered pipe
-    //             else if (c_command.pipe_number > 0) {
-    //                 c_command.output_pipe = create_numbered_pipe(c_job.job_id + c_command.pipe_number, numbered_pipe_map);
-    //             }
+            // if there exists numbered piped which send data to this command
+            if (client.numbered_pipe_map.find(c_job.job_id) != client.numbered_pipe_map.end()) {
 
-    //             // if there exists numbered piped which send data to this command
-    //             if (numbered_pipe_map.find(c_job.job_id) != numbered_pipe_map.end()) {
+                c_command.input_pipe = client.numbered_pipe_map[c_job.job_id];
+                client.numbered_pipe_map.erase(c_job.job_id);
+            }
 
-    //                 c_command.input_pipe = numbered_pipe_map[c_job.job_id];
-    //                 numbered_pipe_map.erase(c_job.job_id);
-    //             }
+            // if no pipe after this command, execute directly
+            execute(c_command, client.numbered_pipe_map, client.conn_fd);
+        }
 
-    //             // if no pipe after this command, execute directly
-    //             execute(c_command, numbered_pipe_map, client_socket);
-    //         }
-
-    //         job_queue.pop();
-    //     }
-    // }
-    // close(client_socket);
+        job_queue.pop();
+    }
+    return false;
 }
 
 // Client clients[31];
@@ -505,8 +571,6 @@ int main(int argc, const char *argv[]) {
     // master server socket
     int msock = passiveTCP(service, 30);
 
-    fd_set rfds;    // read file descriptor set
-    fd_set afds;    // active file descriptor set
     FD_ZERO(&afds); // clear afds
     FD_ZERO(&rfds); // clear rfds
 
@@ -551,10 +615,8 @@ int main(int argc, const char *argv[]) {
                     clients[i].conn_fd = conn_fd;
                     clients[i].ip = string(inet_ntoa(client_addr.sin_addr));
                     clients[i].port = ntohs(client_addr.sin_port);
-                    cout << "map size before login: " << clients[i].environment_var_map.size() << endl;
 
                     client_login(clients[i]);
-                    cout << "map size after login: " << clients[i].environment_var_map.size() << endl;
                     FD_SET(conn_fd, &afds);
                     // send % to client
                     send_msg(clients[i].conn_fd, "% ");
@@ -595,14 +657,19 @@ int main(int argc, const char *argv[]) {
                     init_client_env(clients[i]);
 
                     // process current client command
-                    process_client_command(clients[i]);
+                    bool terminate_client = process_client_command(clients[i]);
+                    if (terminate_client) {
+                        client_logout(clients[i]);
 
-                    // unset current client environment variable
-                    unset_client_env(clients[i]);
+                    } else {
 
-                    // clear buffer
-                    memset(clients[i].buffer, '\0', sizeof(clients[i].buffer));
-                    send_msg(clients[i].conn_fd, "% ");
+                        // unset current client environment variable
+                        unset_client_env(clients[i]);
+
+                        // clear buffer
+                        memset(clients[i].buffer, '\0', sizeof(clients[i].buffer));
+                        send_msg(clients[i].conn_fd, "% ");
+                    }
                 }
             }
         }
@@ -610,5 +677,7 @@ int main(int argc, const char *argv[]) {
 
     // close socket
     close(msock);
+    FD_CLR(msock, &afds);
+
     return 0;
 }
