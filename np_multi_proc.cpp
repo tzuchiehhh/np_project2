@@ -64,7 +64,7 @@ struct Client {
     map<int, pair<int, int>> numbered_pipe_map;
     map<int, pair<int, int>> user_pipe_map;
 
-    map<string, string> environment_var_map;
+    // map<string, string> environment_var_map;
 
 } clients[31];
 
@@ -81,17 +81,17 @@ void send_msg(int fd, string message, bool boradcast = false) {
     return;
 }
 
-void init_client_env(Client client) {
-    for (map<string, string>::iterator it = client.environment_var_map.begin(); it != client.environment_var_map.end(); ++it) {
-        // cout << (it->first) << " " << (it->second) << endl;
-        setenv(const_cast<char *>(it->first.c_str()), const_cast<char *>(it->second.c_str()), 1);
-    }
-};
+// void init_client_env(Client client) {
+//     for (map<string, string>::iterator it = client.environment_var_map.begin(); it != client.environment_var_map.end(); ++it) {
+//         // cout << (it->first) << " " << (it->second) << endl;
+//         setenv(const_cast<char *>(it->first.c_str()), const_cast<char *>(it->second.c_str()), 1);
+//     }
+// };
 
-void unset_client_env(Client &client) {
-    for (map<string, string>::iterator it = client.environment_var_map.begin(); it != client.environment_var_map.end(); ++it)
-        unsetenv(it->first.c_str());
-};
+// void unset_client_env(Client &client) {
+//     for (map<string, string>::iterator it = client.environment_var_map.begin(); it != client.environment_var_map.end(); ++it)
+//         unsetenv(it->first.c_str());
+// };
 
 string remove_endl(char *s) {
     char *bp;
@@ -144,13 +144,16 @@ void close_pipe(pair<int, int> p) {
 }
 
 void client_login(Client &client) {
+    setenv("PATH", "bin:.", 1);
     string welcome_msg = "****************************************\n** Welcome to the information server. **\n****************************************\n";
     string notify_msg = "*** User \'" + client.nickname + "\' entered from " + string(client.ip) + ":" + to_string(client.port) + ". ***\n";
     // welcome message
     send_msg(client.conn_fd, welcome_msg);
     // broadcast message
     send_msg(-1, notify_msg, true);
-    client.environment_var_map["PATH"] = "bin:.";
+    cout <<client.id<<": "<< notify_msg<<endl;
+    // client.environment_var_map["PATH"] = "bin:.";
+    send_msg(client.conn_fd, "% ");
 };
 
 void client_logout(Client &client) {
@@ -176,7 +179,7 @@ void client_logout(Client &client) {
     // close client file descriptor
     close(client.conn_fd);
     // unset client environment variable
-    unset_client_env(client);
+    // unset_client_env(client);
     // clear client fd
     // FD_CLR(client.conn_fd, &afds);
     // reset client
@@ -191,7 +194,7 @@ bool handle_built_in_command(vector<string> tokens, Client &client) {
         // exit(0);
     } else if (tokens[0] == "setenv") {
         setenv(tokens[1].c_str(), tokens[2].c_str(), 1);
-        client.environment_var_map[tokens[1]] = tokens[2];
+        // client.environment_var_map[tokens[1]] = tokens[2];
     } else if (tokens[0] == "printenv") {
         const char *environment_variable = getenv(tokens[1].c_str());
         // check the variable exists or not
@@ -538,123 +541,147 @@ int passiveTCP(const char *service, int qlen) {
     return passivesock(service, "tcp", qlen);
 }
 
-bool process_client_command(Client &client) {
+void serve_client(Client &client) {
+    
+    client_login(client);
+    while (1) {
+        int readcount = read(client.conn_fd, client.buffer, BUFFER_SIZE);
+        // get eof from client
+        if (readcount == 0) {
+            // client logout
+            client_logout(client);
 
-    string user_input = (string)(remove_endl(client.buffer));
-    cout << to_string(client.id) << ": " << user_input << endl;
-    // parse user input
-    char delimiter = ' ';
-    queue<Job> job_queue;
+        } else if (readcount > 0) {
 
-    client.max_job_id = parse(job_queue, user_input, delimiter, client.max_job_id);
-    while (!job_queue.empty()) {
-        Job c_job = job_queue.front();
-        if (c_job.is_built_in_command) {
-            if (handle_built_in_command(c_job.built_in_command, client)) {
-                // client exit
-                return true;
-            }
-            job_queue.pop();
-            continue;
-        }
-        if (c_job.is_self_defined_command) {
-            handle_self_defined_command(c_job.self_defined_command, client);
-            job_queue.pop();
-            continue;
-        }
-        // cout << "command queue size: " << c_job.command_queue.size() << endl;
-        while (!c_job.command_queue.empty()) {
-            Command c_command = c_job.command_queue.front();
-            c_job.command_queue.pop();
+            string user_input = (string)(remove_endl(client.buffer));
+            cout << to_string(client.id) << ": " << user_input << endl;
+            // parse user input
+            char delimiter = ' ';
+            queue<Job> job_queue;
 
-            // cout << "current execute command: ";
-            // for (int i = 0; i < c_command.exec_command.size(); i++) {
-            //     cout << c_command.exec_command[i] << " ";
-            // }
-            // cout << endl;
-
-            // oridinary pipe after this command
-            if (c_command.pipe_number == 0) {
-
-                // read next command
-                Command *n_command = &c_job.command_queue.front();
-
-                // create pipe and assign it to current command output pipe
-                c_command.output_pipe = create_pipe();
-
-                // assign current command output pipe to next command input pipe
-                n_command->input_pipe = c_command.output_pipe;
-            }
-            // numbered pipe
-            else if (c_command.pipe_number > 0) {
-                c_command.output_pipe = create_numbered_pipe(c_job.job_id + c_command.pipe_number, client.numbered_pipe_map);
-            }
-
-            // if there exists numbered piped which send data to this command
-            if (client.numbered_pipe_map.find(c_job.job_id) != client.numbered_pipe_map.end()) {
-
-                c_command.input_pipe = client.numbered_pipe_map[c_job.job_id];
-                client.numbered_pipe_map.erase(c_job.job_id);
-            }
-
-            // this command need to get input from the other client
-            if (c_command.user_pipe_input != -1) {
-
-                // check user exits or not
-                if (c_command.user_pipe_input > 31 || clients[c_command.user_pipe_input].id == -1) {
-                    string err_msg = "*** Error: user #" + to_string(c_command.user_pipe_input) + " does not exist yet. ***\n";
-                    c_command.user_pipe_input = -2;
-                    send_msg(client.conn_fd, err_msg);
+            client.max_job_id = parse(job_queue, user_input, delimiter, client.max_job_id);
+            while (!job_queue.empty()) {
+                Job c_job = job_queue.front();
+                if (c_job.is_built_in_command) {
+                    if (handle_built_in_command(c_job.built_in_command, client)) {
+                        // client exit
+                        client_logout(client);
+                        // return true;
+                    }
+                    job_queue.pop();
+                    continue;
                 }
-                // check pipe exists or not (user_pipe_input --> client.id)
-                else if (clients[c_command.user_pipe_input].user_pipe_map.find(client.id) != clients[c_command.user_pipe_input].user_pipe_map.end()) {
-
-                    string msg = "*** " + client.nickname + " (#" + to_string(client.id) + ") just received from " + clients[c_command.user_pipe_input].nickname + " (#" + to_string(clients[c_command.user_pipe_input].id) + ") by \'" + user_input + "\' ***\n";
-                    send_msg(-1, msg, true);
-                    // cout<<"before command input pipe: "<<c_command.input_pipe.first<<" "<<c_command.input_pipe.second<<endl;
-
-                    c_command.input_pipe = clients[c_command.user_pipe_input].user_pipe_map[client.id];
-                    // cout<<"after command input pipe: "<<c_command.input_pipe.first<<" "<<c_command.input_pipe.second<<endl;
-                    clients[c_command.user_pipe_input].user_pipe_map.erase(client.id);
-
-                } else {
-                    string err_msg = "*** Error: the pipe #" + to_string(c_command.user_pipe_input) + "->#" + to_string(client.id) + " does not exist yet. ***\n";
-                    c_command.user_pipe_input = -2;
-                    send_msg(client.conn_fd, err_msg);
+                if (c_job.is_self_defined_command) {
+                    handle_self_defined_command(c_job.self_defined_command, client);
+                    job_queue.pop();
+                    continue;
                 }
-            }
+                // cout << "command queue size: " << c_job.command_queue.size() << endl;
+                while (!c_job.command_queue.empty()) {
+                    Command c_command = c_job.command_queue.front();
+                    c_job.command_queue.pop();
 
-            // this command need to pipe result to another client
-            if (c_command.user_pipe_output != -1) {
-                // check user exits or not
-                if (c_command.user_pipe_output > 31 || clients[c_command.user_pipe_output].id == -1) {
-                    string err_msg = "*** Error: user #" + to_string(c_command.user_pipe_output) + " does not exist yet. ***\n";
-                    c_command.user_pipe_output = -2;
-                    send_msg(client.conn_fd, err_msg);
+                    // cout << "current execute command: ";
+                    // for (int i = 0; i < c_command.exec_command.size(); i++) {
+                    //     cout << c_command.exec_command[i] << " ";
+                    // }
+                    // cout << endl;
 
-                    // pipe already exists in user_pipe_map
-                } else if (client.user_pipe_map.find(c_command.user_pipe_output) != client.user_pipe_map.end()) {
-                    string err_msg = "*** Error: the pipe #" + to_string(client.id) + "->#" + to_string(c_command.user_pipe_output) + " already exists. ***\n";
-                    c_command.user_pipe_output = -2;
-                    send_msg(client.conn_fd, err_msg);
+                    // oridinary pipe after this command
+                    if (c_command.pipe_number == 0) {
 
-                } else {
-                    // cout<<"before command output pipe: "<<c_command.output_pipe.first<<" "<<c_command.output_pipe.second<<endl;
-                    client.user_pipe_map[c_command.user_pipe_output] = create_pipe();
-                    string msg = "*** " + client.nickname + " (#" + to_string(client.id) + ") just piped \'" + user_input + "\' to " + clients[c_command.user_pipe_output].nickname + " (#" + to_string(clients[c_command.user_pipe_output].id) + ") ***\n";
-                    send_msg(-1, msg, true);
-                    c_command.output_pipe = client.user_pipe_map[c_command.user_pipe_output];
-                    // cout<<"after command output pipe: "<<c_command.output_pipe.first<<" "<<c_command.output_pipe.second<<endl;
+                        // read next command
+                        Command *n_command = &c_job.command_queue.front();
+
+                        // create pipe and assign it to current command output pipe
+                        c_command.output_pipe = create_pipe();
+
+                        // assign current command output pipe to next command input pipe
+                        n_command->input_pipe = c_command.output_pipe;
+                    }
+                    // numbered pipe
+                    else if (c_command.pipe_number > 0) {
+                        c_command.output_pipe = create_numbered_pipe(c_job.job_id + c_command.pipe_number, client.numbered_pipe_map);
+                    }
+
+                    // if there exists numbered piped which send data to this command
+                    if (client.numbered_pipe_map.find(c_job.job_id) != client.numbered_pipe_map.end()) {
+
+                        c_command.input_pipe = client.numbered_pipe_map[c_job.job_id];
+                        client.numbered_pipe_map.erase(c_job.job_id);
+                    }
+
+                    // this command need to get input from the other client
+                    if (c_command.user_pipe_input != -1) {
+
+                        // check user exits or not
+                        if (c_command.user_pipe_input > 31 || clients[c_command.user_pipe_input].id == -1) {
+                            string err_msg = "*** Error: user #" + to_string(c_command.user_pipe_input) + " does not exist yet. ***\n";
+                            c_command.user_pipe_input = -2;
+                            send_msg(client.conn_fd, err_msg);
+                        }
+                        // check pipe exists or not (user_pipe_input --> client.id)
+                        else if (clients[c_command.user_pipe_input].user_pipe_map.find(client.id) != clients[c_command.user_pipe_input].user_pipe_map.end()) {
+
+                            string msg = "*** " + client.nickname + " (#" + to_string(client.id) + ") just received from " + clients[c_command.user_pipe_input].nickname + " (#" + to_string(clients[c_command.user_pipe_input].id) + ") by \'" + user_input + "\' ***\n";
+                            send_msg(-1, msg, true);
+                            // cout<<"before command input pipe: "<<c_command.input_pipe.first<<" "<<c_command.input_pipe.second<<endl;
+
+                            c_command.input_pipe = clients[c_command.user_pipe_input].user_pipe_map[client.id];
+                            // cout<<"after command input pipe: "<<c_command.input_pipe.first<<" "<<c_command.input_pipe.second<<endl;
+                            clients[c_command.user_pipe_input].user_pipe_map.erase(client.id);
+
+                        } else {
+                            string err_msg = "*** Error: the pipe #" + to_string(c_command.user_pipe_input) + "->#" + to_string(client.id) + " does not exist yet. ***\n";
+                            c_command.user_pipe_input = -2;
+                            send_msg(client.conn_fd, err_msg);
+                        }
+                    }
+
+                    // this command need to pipe result to another client
+                    if (c_command.user_pipe_output != -1) {
+                        // check user exits or not
+                        if (c_command.user_pipe_output > 31 || clients[c_command.user_pipe_output].id == -1) {
+                            string err_msg = "*** Error: user #" + to_string(c_command.user_pipe_output) + " does not exist yet. ***\n";
+                            c_command.user_pipe_output = -2;
+                            send_msg(client.conn_fd, err_msg);
+
+                            // pipe already exists in user_pipe_map
+                        } else if (client.user_pipe_map.find(c_command.user_pipe_output) != client.user_pipe_map.end()) {
+                            string err_msg = "*** Error: the pipe #" + to_string(client.id) + "->#" + to_string(c_command.user_pipe_output) + " already exists. ***\n";
+                            c_command.user_pipe_output = -2;
+                            send_msg(client.conn_fd, err_msg);
+
+                        } else {
+                            // cout<<"before command output pipe: "<<c_command.output_pipe.first<<" "<<c_command.output_pipe.second<<endl;
+                            client.user_pipe_map[c_command.user_pipe_output] = create_pipe();
+                            string msg = "*** " + client.nickname + " (#" + to_string(client.id) + ") just piped \'" + user_input + "\' to " + clients[c_command.user_pipe_output].nickname + " (#" + to_string(clients[c_command.user_pipe_output].id) + ") ***\n";
+                            send_msg(-1, msg, true);
+                            c_command.output_pipe = client.user_pipe_map[c_command.user_pipe_output];
+                            // cout<<"after command output pipe: "<<c_command.output_pipe.first<<" "<<c_command.output_pipe.second<<endl;
+                        }
+                    }
+
+                    // if no pipe after this command, execute directly
+                    execute(c_command, client);
                 }
-            }
 
-            // if no pipe after this command, execute directly
-            execute(c_command, client);
+                job_queue.pop();
+            }
         }
 
-        job_queue.pop();
+        send_msg(client.conn_fd, "% ");
     }
-    return false;
+    return;
+}
+
+void signal_handler(int signum) {
+    // ctrl-c
+    if (signum == SIGINT) {
+        // need to detach shared memory
+        cout<<"ctrl-c!!!!!!!!!!!!!!!!!!!!!!!!!"<<endl;
+        exit(0);
+    }
 }
 
 // Client clients[31];
@@ -662,6 +689,7 @@ int main(int argc, const char *argv[]) {
 
     // set initial environment variable
     setenv("PATH", "bin:.", 1);
+    signal(SIGINT, signal_handler);
 
     int server_port = stoi(argv[1], nullptr);
     // set service to server port
@@ -669,16 +697,10 @@ int main(int argc, const char *argv[]) {
     // master server socket
     int msock = passiveTCP(service, 30);
 
-    // FD_ZERO(&afds); // clear afds
-    // FD_ZERO(&rfds); // clear rfds
-
-    // // add msock into afds
-    // FD_SET(msock, &afds);
-
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
 
-    string user_input;
+    // string user_input;
     map<int, pair<int, int>> numbered_pipe_map;
     int job_id = 0;
     while (1) {
@@ -690,18 +712,17 @@ int main(int argc, const char *argv[]) {
         }
 
         bool find_id = false;
-        for (int i = 1; i < 31; i++) {
+        int i;
+        for (i = 1; i < 31; i++) {
             if (clients[i].id == -1) {
                 find_id = true;
                 clients[i].id = i;
                 clients[i].conn_fd = conn_fd;
                 clients[i].ip = string(inet_ntoa(client_addr.sin_addr));
                 clients[i].port = ntohs(client_addr.sin_port);
+                memset(clients[i].buffer, '\0', sizeof(clients[i].buffer));
 
-                // client_login(clients[i]);
-                // FD_SET(conn_fd, &afds);
-                // send % to client
-                // send_msg(clients[i].conn_fd, "% ");
+
                 break;
             }
         }
@@ -721,7 +742,8 @@ int main(int argc, const char *argv[]) {
         }
 
         if (server_pid == 0) { // child
-            // serve each client 
+            // serve each client
+            serve_client(clients[i]);
 
         } else { // parent
 
@@ -729,86 +751,6 @@ int main(int argc, const char *argv[]) {
             close(conn_fd);
             signal(SIGCHLD, SIG_IGN);
         }
-        // copy afds to rfds
-        // memcpy(&rfds, &afds, sizeof(afds));
-        // if (readyfd = select(maxfd + 1, &rfds, NULL, NULL, NULL) == -1) {
-        //     continue;
-        // }
-
-        // get the size of file descriptor table
-        // int nfds = getdtablesize();
-        // if (select(nfds, &rfds, (fd_set *)0, (fd_set *)0, (struct timeval *)0) < 0) {
-        //     // cerr << "select failed" << endl;
-        //     continue;
-        // }
-
-        // int conn_fd;
-
-        // if (FD_ISSET(msock, &rfds)) {
-        //     conn_fd = accept(msock, (struct sockaddr *)&client_addr, (socklen_t *)&client_len);
-        //     while (conn_fd < 0) {
-        //         conn_fd = accept(msock, (struct sockaddr *)&client_addr, (socklen_t *)&client_len);
-        //     }
-
-        //     // get client id
-        //     bool find_id = false;
-        //     for (int i = 1; i < 31; i++) {
-        //         if (clients[i].id == -1) {
-        //             find_id = true;
-        //             clients[i].id = i;
-        //             clients[i].conn_fd = conn_fd;
-        //             clients[i].ip = string(inet_ntoa(client_addr.sin_addr));
-        //             clients[i].port = ntohs(client_addr.sin_port);
-
-        //             client_login(clients[i]);
-        //             // FD_SET(conn_fd, &afds);
-        //             // send % to client
-        //             send_msg(clients[i].conn_fd, "% ");
-        //             break;
-        //         }
-        //     }
-
-        //     // too many clients
-        //     if (!find_id) {
-        //         close(conn_fd);
-        //     }
-        // }
-
-        // for (int i = 1; i < 31; i++) {
-        //     // client does not exist
-        //     if (clients[i].conn_fd == -1)
-        //         continue;
-
-        //     if (FD_ISSET(clients[i].conn_fd, &rfds)) {
-        //         int readcount = read(clients[i].conn_fd, clients[i].buffer, BUFFER_SIZE);
-        //         // get eof from client
-        //         if (readcount == 0) {
-        //             // client logout
-        //             client_logout(clients[i]);
-
-        //         } else if (readcount > 0) {
-
-        //             // set current client environment variable
-
-        //             init_client_env(clients[i]);
-
-        //             // process current client command
-        //             bool terminate_client = process_client_command(clients[i]);
-        //             if (terminate_client) {
-        //                 client_logout(clients[i]);
-
-        //             } else {
-
-        //                 // unset current client environment variable
-        //                 unset_client_env(clients[i]);
-
-        //                 // clear buffer
-        //                 memset(clients[i].buffer, '\0', sizeof(clients[i].buffer));
-        //                 send_msg(clients[i].conn_fd, "% ");
-        //             }
-        //         }
-        //     }
-        // }
     }
 
     // close socket
