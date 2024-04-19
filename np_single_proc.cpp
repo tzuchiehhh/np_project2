@@ -18,6 +18,7 @@
 #include <vector>
 #include <wait.h>
 
+
 #define BUFFER_SIZE 15001
 
 using namespace std;
@@ -155,8 +156,8 @@ void client_login(Client &client) {
 
 void client_logout(Client &client) {
     string notify_msg = "*** User \'" + client.nickname + "\' left. ***\n";
-    // broadcast message
-    send_msg(-1, notify_msg, true);
+    // // broadcast message
+    // send_msg(-1, notify_msg, true);
     // reset buffer
     memset(client.buffer, '\0', sizeof(client.buffer));
 
@@ -181,6 +182,8 @@ void client_logout(Client &client) {
     FD_CLR(client.conn_fd, &afds);
     // reset client
     client = Client();
+    // broadcast message
+    send_msg(-1, notify_msg, true);
 };
 
 bool handle_built_in_command(vector<string> tokens, Client &client) {
