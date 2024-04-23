@@ -158,7 +158,7 @@ bool check_fifo_exist(const char *path) {
     return access(path, F_OK) != -1;
 }
 
-void client_logout(Client &client) {
+void client_logout(Client &client, bool server_logout = false) {
     string notify_msg = "*** User \'" + string(client.nickname) + "\' left. ***\n";
 
     // reset buffer
@@ -202,7 +202,8 @@ void client_logout(Client &client) {
     sem_init(&client.buffer_sem, 1, 1);
     sem_init(&client.user_pipe_sem, 1, 1);
     // broadcast message
-    send_msg(client, notify_msg, true);
+    if (server_logout == false)
+        send_msg(client, notify_msg, true);
     shmdt(clients);
 };
 
@@ -731,6 +732,12 @@ void signal_handler(int signum) {
     // ctrl-c
     if (signum == SIGINT) {
         cout << "ctrl-c!!!!!!!!!!!!!!!!!!!!!!!!!" << endl;
+
+        for (int i = 1; i < 31; i++) {
+            if (clients[i].id != -1) {
+                client_logout(clients[i], true);
+            }
+        }
         // detach and remove shared memory
         shmdt(clients);
         shmctl(shm_id, IPC_RMID, 0);
