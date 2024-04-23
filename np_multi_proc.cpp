@@ -154,27 +154,42 @@ void client_login(Client &client) {
     send_msg(client, "% ");
 };
 
+bool check_fifo_exist(const char *path) {
+    return access(path, F_OK) != -1;
+}
+
 void client_logout(Client &client) {
     string notify_msg = "*** User \'" + string(client.nickname) + "\' left. ***\n";
 
     // reset buffer
     memset(client.buffer, '\0', sizeof(client.buffer));
     memset(client.nickname, '\0', sizeof(client.nickname));
+
+    // close related user_pipe file descriptor and unlink related fifo
     for (int i = 1; i < 31; i++) {
         // cout << i << endl;
+        string fifo_name = "user_pipe/fifo_" + to_string(i) + "_" + to_string(client.id);
         sem_wait(&clients[i].user_pipe_sem);
         if (clients[i].user_pipe_map[client.id] != -1) {
             close(clients[i].user_pipe_map[client.id]);
             clients[i].user_pipe_map[client.id] = -1;
+        }
+        if (check_fifo_exist(fifo_name.c_str())) {
+            unlink(fifo_name.c_str());
         }
         sem_post(&clients[i].user_pipe_sem);
     }
 
     sem_wait(&client.user_pipe_sem);
     for (int i = 1; i < 31; i++) {
+        string fifo_name = "user_pipe/fifo_" + to_string(client.id) + "_" + to_string(i);
         if (client.user_pipe_map[i] != -1) {
+            int tmp = client.user_pipe_map[i];
             close(client.user_pipe_map[i]);
             client.user_pipe_map[i] = -1;
+        }
+        if (check_fifo_exist(fifo_name.c_str())) {
+            unlink(fifo_name.c_str());
         }
     }
     sem_post(&client.user_pipe_sem);
@@ -183,7 +198,7 @@ void client_logout(Client &client) {
     close(client.conn_fd);
     // reset client
     client = Client();
-    fill(client.user_pipe_map, client.user_pipe_map + 30, -1);
+    fill(client.user_pipe_map, client.user_pipe_map + 31, -1);
     sem_init(&client.buffer_sem, 1, 1);
     sem_init(&client.user_pipe_sem, 1, 1);
     // broadcast message
@@ -509,6 +524,10 @@ void execute(Command command, Client &client, map<int, pair<int, int>> &numbered
             close_pipe(command.input_pipe);
         }
 
+        if (command.user_pipe_input > 0) {
+            close(clients[command.user_pipe_input].user_pipe_map[client.id]);
+        }
+
         // if there is any pipe (including ordinary pipe, numbered pipe and user pipe) after the command, don't wait
         if (command.pipe_number >= 0 || command.user_pipe_output > 0) {
             signal(SIGCHLD, SIG_IGN);
@@ -741,7 +760,7 @@ void signal_handler(int signum) {
 
 void init_all_clients() {
     for (int i = 1; i < 31; i++) {
-        fill(clients[i].user_pipe_map, clients[i].user_pipe_map + 30, -1);
+        fill(clients[i].user_pipe_map, clients[i].user_pipe_map + 31, -1);
         sem_init(&clients[i].buffer_sem, 1, 1);
         sem_init(&clients[i].user_pipe_sem, 1, 1);
     }
